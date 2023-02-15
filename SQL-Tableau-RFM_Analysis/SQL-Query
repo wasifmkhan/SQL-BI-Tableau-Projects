@@ -1,0 +1,337 @@
+CREATE DATABASE rfm_data;
+USE rfm_data;
+
+DESC sales_data;
+
+The DATE table includes TIMESTAMP and is in TEXT format. This will need to be converted to DATE format.
+
+SELECT SUBSTRING_INDEX(ORDERDATE, ' ', 1) AS D_ORDERDATE FROM sales_data;
+
+ALTER TABLE sales_data
+ADD D_ORDERDATE TEXT;
+
+UPDATE sales_data
+SET sales_data.D_ORDERDATE = SUBSTRING_INDEX(sales_data.ORDERDATE, ' ', 1);
+
+Change to YYYY-MM-DD format
+
+SELECT STR_TO_DATE(D_ORDERDATE, '%m/%d/%Y') FROM sales_data;
+
+ALTER TABLE sales_data
+ADD N_ORDERDATE DATE;
+
+UPDATE sales_data
+SET sales_data.N_ORDERDATE = STR_TO_DATE(D_ORDERDATE, '%m/%d/%Y') ;
+
+ALTER TABLE sales_data
+DROP D_ORDERDATE;
+
+
+-- Inspecting Data
+SELECT * FROM sales_data;
+
+# Check unique values
+SELECT DISTINCT STATUS FROM sales_data; # Nice data to plot
+SELECT DISTINCT COUNTRY FROM sales_data;
+SELECT DISTINCT PRODUCTLINE FROM sales_data; # Maybe geographical plot
+SELECT DISTINCT DEALSIZE FROM sales_data; # only 3 sizes
+SELECT DISTINCT year_id FROM sales_data; # 3 years
+
+
+-- Analysis
+
+# Lets start grouping sales by product line
+SELECT ROUND(SUM(sales), 2) AS revenue, productline FROM sales_data
+GROUP BY productline
+ORDER BY revenue DESC;
+
+SELECT ROUND(SUM(sales), 2) AS revenue, year_id FROM sales_data
+GROUP BY year_id
+ORDER BY year_id;
+
+# Sales seem quite low for 2005
+# What could be the reason?
+
+# Lets check if they operated the whole year?
+SELECT DISTINCT month_id from sales_data
+WHERE year_id = 2005;
+# Looks like they only operated for 5 months in 2005
+# Explains why sales was low
+
+# Which size of cars are selling more?
+SELECT ROUND(SUM(sales), 2) AS revenue, dealsize FROM sales_data
+GROUP BY dealsize
+ORDER BY revenue DESC;
+# Medium sized cars are best selling easily
+
+# Best month for sales?
+SELECT month_id, ROUND(sum(SALES), 2) AS revenue, COUNT(ordernumber) AS frequency
+FROM sales_data
+WHERE year_id = 2003
+GROUP BY month_id
+ORDER BY revenue DESC;
+# Here frequency is how many units we are selling
+# We see that October and November are good selling months
+
+# Similar trend for 2004
+# So far we've established:
+# The best product is classic cars, best month is November, best size of cars is medium size and classic cars
+
+# Based on order frequency, What product sells most on November
+SELECT month_id, productline, ROUND(sum(SALES), 2) AS revenue, COUNT(ordernumber) AS frequency
+FROM sales_data
+WHERE year_id = 2003 AND month_id = 11
+GROUP BY month_id, productline
+ORDER BY revenue DESC;
+# Nothing surprising here
+
+-- RFM analysis
+# Who is our best customer? To find this we need to do RFM analysis
+
+SELECT 
+	CUSTOMERNAME,
+    ROUND(AVG(SALES), 2) AS avg_monetary_value,
+    ROUND(SUM(SALES), 2) AS monetary_value,
+    COUNT(ORDERNUMBER) AS frequency,
+    MAX(ORDERDATE) as last_order_date #its already in date-time format
+FROM sales_data
+GROUP BY CUSTOMERNAME;
+# Note: We need to do a DATEDIFF between 2 last orders to determine recency
+
+SELECT 
+	CUSTOMERNAME,
+    ROUND(AVG(SALES), 2) AS avg_monetary_value,
+    ROUND(SUM(SALES), 2) AS monetary_value,
+    COUNT(ORDERNUMBER) AS frequency,
+    MAX(ORDERDATE) as last_order_date, #need to run a subquery
+    (SELECT MAX(ORDERDATE) FROM sales_data) AS  max_order_date # This shows the last time anyone order anything from us
+FROM sales_data
+GROUP BY CUSTOMERNAME;
+# The reason for the subquery is datediff
+
+
+SELECT 
+	CUSTOMERNAME,
+    ROUND(AVG(SALES), 2) AS avg_monetary_value,
+    ROUND(SUM(SALES), 2) AS monetary_value,
+    COUNT(ORDERNUMBER) AS frequency,
+    MAX(N_ORDERDATE) as last_order_date, #need to run a subquery
+    (SELECT MAX(N_ORDERDATE) FROM sales_data) AS  max_order_date, # This shows the last time anyone order anything from us
+    DATEDIFF(MAX(N_ORDERDATE), (SELECT MAX(N_ORDERDATE) FROM sales_data))*-1 AS renency
+FROM sales_data
+GROUP BY CUSTOMERNAME
+ORDER BY renency DESC;
+
+-- We need to bucket these results in 4 Groups
+-- Use Window functions
+
+WITH rfm AS (
+SELECT 
+	CUSTOMERNAME,
+    ROUND(AVG(SALES), 2) AS avg_monetary_value,
+    ROUND(SUM(SALES), 2) AS monetary_value,
+    COUNT(ORDERNUMBER) AS frequency,
+    MAX(N_ORDERDATE) as last_order_date, #need to run a subquery
+    (SELECT MAX(N_ORDERDATE) FROM sales_data) AS  max_order_date, # This shows the last time anyone order anything from us
+    DATEDIFF(MAX(N_ORDERDATE), (SELECT MAX(N_ORDERDATE) FROM sales_data))*-1 AS renency
+FROM sales_data
+GROUP BY CUSTOMERNAME
+)
+SELECT r.*,
+	NTILE(4) OVER (ORDER BY renency DESC) AS rfm_renency,
+    NTILE(4) OVER (ORDER BY frequency) AS rfm_frequency,
+    NTILE(4) OVER (ORDER BY avg_monetary_value) AS rfm_monetary
+FROM rfm r
+ORDER BY frequency DESC
+
+
+-- Case statement
+WITH rfm AS (
+SELECT 
+	CUSTOMERNAME,
+    ROUND(AVG(SALES), 2) AS avg_monetary_value,
+    ROUND(SUM(SALES), 2) AS monetary_value,
+    COUNT(ORDERNUMBER) AS frequency,
+    MAX(N_ORDERDATE) as last_order_date, #need to run a subquery
+    (SELECT MAX(N_ORDERDATE) FROM sales_data) AS  max_order_date, # This shows the last time anyone order anything from us
+    DATEDIFF(MAX(N_ORDERDATE), (SELECT MAX(N_ORDERDATE) FROM sales_data))*-1 AS renency
+FROM sales_data
+GROUP BY CUSTOMERNAME
+),
+rfm_calc AS (
+	SELECT r.*,
+		NTILE(4) OVER (ORDER BY renency DESC) AS rfm_renency,
+		NTILE(4) OVER (ORDER BY frequency) AS rfm_frequency,
+		NTILE(4) OVER (ORDER BY avg_monetary_value) AS rfm_monetary
+	FROM rfm r
+)
+SELECT c.*,
+	rfm_renency+rfm_frequency+rfm_monetary AS rfm_cell,
+    CONCAT(rfm_renency, rfm_frequency, rfm_monetary) AS rfm_cell_string
+FROM rfm_calc c
+
+# Put it all in a view so you dont have to run it everytime
+CREATE VIEW r_rfm AS
+WITH rfm AS (
+SELECT 
+	CUSTOMERNAME,
+    ROUND(AVG(SALES), 2) AS avg_monetary_value,
+    ROUND(SUM(SALES), 2) AS monetary_value,
+    COUNT(ORDERNUMBER) AS frequency,
+    MAX(N_ORDERDATE) as last_order_date, #need to run a subquery
+    (SELECT MAX(N_ORDERDATE) FROM sales_data) AS  max_order_date, # This shows the last time anyone order anything from us
+    DATEDIFF(MAX(N_ORDERDATE), (SELECT MAX(N_ORDERDATE) FROM sales_data))*-1 AS renency
+FROM sales_data
+GROUP BY CUSTOMERNAME
+),
+rfm_calc AS (
+	SELECT r.*,
+		NTILE(4) OVER (ORDER BY renency DESC) AS rfm_renency,
+		NTILE(4) OVER (ORDER BY frequency) AS rfm_frequency,
+		NTILE(4) OVER (ORDER BY monetary_value) AS rfm_monetary
+	FROM rfm r
+)
+SELECT c.*,
+	rfm_renency+rfm_frequency+rfm_monetary AS rfm_cell,
+    CONCAT(rfm_renency, rfm_frequency, rfm_monetary) AS rfm_cell_string
+FROM rfm_calc c;
+
+# Check if it works
+SELECT * FROM r_rfm;
+
+# Time to do segmentations
+select CUSTOMERNAME, rfm_renency, rfm_frequency, rfm_monetary,
+	case 
+		when rfm_cell_string in (111, 112 , 121, 122, 123, 132, 211, 212, 114, 141) then 'lost_customers'  #lost customers
+		when rfm_cell_string in (133, 134, 143, 244, 334, 343, 344, 144) then 'slipping away, cannot lose' # (Big spenders who haven’t purchased lately) slipping away
+		when rfm_cell_string in (311, 411, 331) then 'new customers'
+		when rfm_cell_string in (222, 223, 233, 322) then 'potential churners'
+		when rfm_cell_string in (323, 333,321, 422, 332, 432) then 'active' #(Customers who buy often & recently, but at low price points)
+		when rfm_cell_string in (433, 434, 443, 444) then 'loyal'
+	end rfm_segment
+from r_rfm;
+# Could have used RFM_cell too to say if value greater than 9 then high value customer
+# The combination of numbers are refering to how recent buyers are buying, how frequently, how big the ordersize
+
+# If a customer bought something recently, give the receny value a higher number
+# and similar trend for the other metrics
+
+-- What 2 products are more often sold together
+-- e.g. SELECT * FROM sales_data WHERE ORDERNUMBER = 10411 We see that there are multiple types of product under that one order number
+
+SELECT ORDERNUMBER, COUNT(*) AS rn
+FROM sales_data
+WHERE STATUS = 'Shipped'
+GROUP BY ORDERNUMBER;
+# There are multiple products under one ORDENUMBER
+
+# So lets see how many ORDERNUMBER have 2 items together
+SELECT ORDERNUMBER FROM (
+	SELECT ORDERNUMBER, COUNT(*) AS rn
+	FROM sales_data
+	WHERE STATUS = 'Shipped'
+	GROUP BY ORDERNUMBER
+) AS m
+WHERE rn =2;
+
+# Lets see the product code for these orders
+
+SELECT PRODUCTCODE
+FROM sales_data
+	WHERE ORDERNUMBER in (
+		SELECT ORDERNUMBER FROM (
+			SELECT ORDERNUMBER, COUNT(*) AS rn
+			FROM sales_data
+			WHERE STATUS = 'Shipped'
+			GROUP BY ORDERNUMBER
+		) AS m
+		WHERE rn =2
+);
+
+# IF a particular order had two product codes, appead them in the column than rows
+SELECT CONCAT(',', PRODUCTCODE)
+FROM sales_data
+	WHERE ORDERNUMBER in (
+		SELECT ORDERNUMBER FROM (
+			SELECT ORDERNUMBER, COUNT(*) AS rn
+			FROM sales_data
+			WHERE STATUS = 'Shipped'
+			GROUP BY ORDERNUMBER
+		) AS m
+		WHERE rn =2
+);
+
+
+-- The next portion was done in Microsft SQL using T-SQL
+-- This is because MySQL has to direct way to transpose data and 
+-- alternatives like GROUP CONCAT and JOINS would take long production time 
+
+# Next lets use xml path
+select distinct OrderNumber, stuff(
+
+	(select ',' + PRODUCTCODE
+	from [dbo].[sales_data_sample] p
+	where ORDERNUMBER in 
+		(
+
+			select ORDERNUMBER
+			from (
+				select ORDERNUMBER, count(*) rn
+				FROM [PortfolioDB].[dbo].[sales_data_sample]
+				where STATUS = 'Shipped'
+				group by ORDERNUMBER
+			)m
+			where rn = 3
+		)
+		and p.ORDERNUMBER = s.ORDERNUMBER
+		for xml path (''))
+
+		, 1, 1, '') ProductCodes
+
+from [dbo].[sales_data_sample] s
+order by 2 desc
+
+# This allows us to see which two products are combined in a order
+
+
+-- What city has the highest number of sales in a specific country
+select city, ROUND(SUM(sales), 2) AS Revenue
+from sales_data
+where country = 'UK'
+group by city
+order by 2 desc
+
+-- What is the best product in United States?
+select country, YEAR_ID, PRODUCTLINE, ROUND(sum(sales), 2) AS Revenue
+from sales_data
+where country = 'USA'
+group by  country, YEAR_ID, PRODUCTLINE
+order by 4 desc
+
+
+# Visualisation Done in Tableau Public
+
+Dashboard 1: https://public.tableau.com/app/profile/wasif.khan/viz/temp_16764423395800/SalesDash2
+
+Dashboard 2: https://public.tableau.com/app/profile/wasif.khan/viz/2SQL-Tableau-SalesDashboardProject/SalesDashboard?publish=yes
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
